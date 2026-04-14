@@ -34,4 +34,25 @@ class PlatformDefinitionsTest {
         assertEquals("pico8", PlatformDefinitions.getCanonicalSlug("pico8"))
         assertEquals("pico", PlatformDefinitions.getCanonicalSlug("pico"))
     }
+
+    @Test
+    fun `hacks and staging folders resolve to their parent platform`() {
+        assertEquals("snes", PlatformDefinitions.getCanonicalSlug("snes-hacks"))
+        assertEquals("snes", PlatformDefinitions.getCanonicalSlug("sfam-hacks"))
+        assertEquals("gc", PlatformDefinitions.getCanonicalSlug("ngc-hacks"))
+        assertEquals("3ds", PlatformDefinitions.getCanonicalSlug("3ds-staging"))
+        assertEquals("pc9800", PlatformDefinitions.getCanonicalSlug("pc98-hacks"))
+        assertEquals("neogeocd", PlatformDefinitions.getCanonicalSlug("neo-geo-cd-hacks"))
+        assertEquals("tgcd", PlatformDefinitions.getCanonicalSlug("turbografx-cd-hacks"))
+        assertEquals("unknown-hacks", PlatformDefinitions.getCanonicalSlug("unknown-hacks"))
+    }
+
+    @Test
+    fun `hacks folders derive a display name from the longest known parent`() {
+        assertEquals("SNES Hacks" to "SNES Hacks", PlatformDefinitions.deriveDisplayName("snes-hacks"))
+        assertEquals("NGCD Hacks" to "NGCD Hacks", PlatformDefinitions.deriveDisplayName("neo-geo-cd-hacks"))
+        assertEquals("TG-CD Hacks" to "TG-CD Hacks", PlatformDefinitions.deriveDisplayName("turbografx-cd-hacks"))
+        assertEquals(null, PlatformDefinitions.deriveDisplayName("neo-geo-cd"))
+        assertEquals(null, PlatformDefinitions.deriveDisplayName("snes-"))
+    }
 }

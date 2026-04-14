@@ -657,13 +657,23 @@ object PlatformDefinitions {
         val lower = slug.lowercase()
         slugAliases[lower]?.let { return it }
         if (platformMap.containsKey(lower)) return lower
-        val sep = lower.indexOfFirst { it == '-' || it == '_' || it == ' ' }
-        if (sep > 0) {
+        return knownPrefix(lower)?.first ?: lower
+    }
+
+    /**
+     * Splits `<platform><sep><suffix>` at the longest prefix the registry knows, returning the
+     * prefix's canonical slug and the suffix. Longest-first so a parent whose own slug contains a
+     * separator (`neo-geo-cd-hacks`, `turbografx-cd-hacks`) resolves to it rather than to nothing.
+     */
+    private fun knownPrefix(lower: String): Pair<String, String>? {
+        for (sep in lower.indices.reversed()) {
+            if (lower[sep] != '-' && lower[sep] != '_' && lower[sep] != ' ') continue
+            if (sep == 0 || sep >= lower.length - 1) continue
             val prefix = lower.substring(0, sep)
-            slugAliases[prefix]?.let { return it }
-            if (platformMap.containsKey(prefix)) return prefix
+            val canonical = slugAliases[prefix] ?: prefix.takeIf { platformMap.containsKey(it) }
+            if (canonical != null) return canonical to lower.substring(sep + 1)
         }
-        return lower
+        return null
     }
 
     private val pico8NamePattern = Regex("pico[-_ ]?8", RegexOption.IGNORE_CASE)
@@ -700,12 +710,9 @@ object PlatformDefinitions {
         if (slug.isNullOrBlank()) return null
         val lower = slug.lowercase()
         if (lower in slugAliases || lower in platformMap) return null
-        val sep = lower.indexOfFirst { it == '-' || it == '_' || it == ' ' }
-        if (sep <= 0 || sep >= lower.length - 1) return null
-        val prefix = lower.substring(0, sep)
-        val canonical = slugAliases[prefix] ?: prefix
+        val (canonical, rest) = knownPrefix(lower) ?: return null
         val parentDef = platformMap[canonical] ?: return null
-        val suffix = lower.substring(sep + 1)
+        val suffix = rest
             .split('-', '_')
             .filter { it.isNotEmpty() }
             .joinToString(" ") { it.replaceFirstChar { c -> c.titlecase() } }

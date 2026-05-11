@@ -14,6 +14,7 @@ import com.nendo.argosy.domain.usecase.collection.PinCollectionUseCase
 import com.nendo.argosy.domain.usecase.collection.RefreshAllCollectionsUseCase
 import com.nendo.argosy.domain.usecase.collection.UnpinCollectionUseCase
 import com.nendo.argosy.domain.usecase.download.DownloadGameUseCase
+import com.nendo.argosy.domain.usecase.download.DownloadResult
 import com.nendo.argosy.core.notification.NotificationDuration
 import com.nendo.argosy.core.notification.NotificationManager
 import com.nendo.argosy.core.notification.NotificationType
@@ -21,6 +22,7 @@ import com.nendo.argosy.ui.input.InputHandler
 import com.nendo.argosy.ui.input.InputResult
 import com.nendo.argosy.ui.screens.collections.dialogs.CollectionOption
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -78,13 +80,19 @@ data class CollectionDetailUiState(
     val showDeleteDialog: Boolean = false,
     val showRemoveGameDialog: Boolean = false,
     val gameToRemove: CollectionGameUi? = null,
-    val isPinned: Boolean = false
+    val isPinned: Boolean = false,
+    val downloadAllProgress: DownloadAllProgress = DownloadAllProgress()
 ) {
     val focusedGame: CollectionGameUi?
         get() = games.getOrNull(focusedIndex)
 
     val downloadableGamesCount: Int
         get() = games.count { !it.isDownloaded && it.rommId != null }
+
+    val canDownloadCollection: Boolean
+        get() = downloadableGamesCount > 0 &&
+                !downloadAllProgress.isActive &&
+                !downloadAllProgress.isOnCooldown
 }
 
 @HiltViewModel
@@ -105,6 +113,7 @@ class CollectionDetailViewModel @Inject constructor(
 
     private data class ModalState(
         val focusedIndex: Int = 0,
+        val focusedGameId: Long? = null,
         val showOptionsModal: Boolean = false,
         val optionsModalFocusIndex: Int = 0,
         val showEditDialog: Boolean = false,
@@ -112,7 +121,8 @@ class CollectionDetailViewModel @Inject constructor(
         val showRemoveGameDialog: Boolean = false,
         val gameToRemove: CollectionGameUi? = null,
         val isPinned: Boolean = false,
-        val isRefreshing: Boolean = false
+        val isRefreshing: Boolean = false,
+        val downloadAllProgress: DownloadAllProgress = DownloadAllProgress()
     )
 
     private val _modalState = MutableStateFlow(ModalState())
@@ -121,6 +131,7 @@ class CollectionDetailViewModel @Inject constructor(
 
     companion object {
         private const val REFRESH_DEBOUNCE_MS = 30_000L
+        private const val DOWNLOAD_ALL_COOLDOWN_MS = 180_000L
     }
 
     init {
@@ -146,19 +157,25 @@ class CollectionDetailViewModel @Inject constructor(
             val gamesUi = games.map { game ->
                 game.toCollectionGameUi(platformMap[game.platformId] ?: "Unknown")
             }
+            val fallbackFocusedIndex = modalState.focusedIndex.coerceIn(0, (gamesUi.size - 1).coerceAtLeast(0))
+            val focusedIndex = modalState.focusedGameId
+                ?.let { focusedId -> gamesUi.indexOfFirst { it.id == focusedId } }
+                ?.takeIf { it >= 0 }
+                ?: fallbackFocusedIndex
             CollectionDetailUiState(
                 collection = collection,
                 games = gamesUi,
                 isLoading = false,
                 isRefreshing = modalState.isRefreshing,
-                focusedIndex = modalState.focusedIndex.coerceIn(0, (gamesUi.size - 1).coerceAtLeast(0)),
+                focusedIndex = focusedIndex,
                 showOptionsModal = modalState.showOptionsModal,
                 optionsModalFocusIndex = modalState.optionsModalFocusIndex,
                 showEditDialog = modalState.showEditDialog,
                 showDeleteDialog = modalState.showDeleteDialog,
                 showRemoveGameDialog = modalState.showRemoveGameDialog,
                 gameToRemove = modalState.gameToRemove,
-                isPinned = modalState.isPinned
+                isPinned = modalState.isPinned,
+                downloadAllProgress = modalState.downloadAllProgress
             )
         }
     }.stateIn(
@@ -168,18 +185,28 @@ class CollectionDetailViewModel @Inject constructor(
     )
 
     fun moveUp() {
-        val currentIndex = _modalState.value.focusedIndex
+        val currentIndex = uiState.value.focusedIndex
         if (currentIndex > 0) {
-            _modalState.value = _modalState.value.copy(focusedIndex = currentIndex - 1)
+            setFocusedIndex(currentIndex - 1)
         }
     }
 
     fun moveDown() {
         val state = uiState.value
-        val currentIndex = _modalState.value.focusedIndex
+        val currentIndex = state.focusedIndex
         if (currentIndex < state.games.size - 1) {
-            _modalState.value = _modalState.value.copy(focusedIndex = currentIndex + 1)
+            setFocusedIndex(currentIndex + 1)
         }
+    }
+
+    private fun setFocusedIndex(index: Int) {
+        val state = uiState.value
+        val maxIndex = (state.games.size - 1).coerceAtLeast(0)
+        val focusedIndex = index.coerceIn(0, maxIndex)
+        _modalState.value = _modalState.value.copy(
+            focusedIndex = focusedIndex,
+            focusedGameId = state.games.getOrNull(focusedIndex)?.id
+        )
     }
 
     fun showOptionsModal() {
@@ -196,7 +223,7 @@ class CollectionDetailViewModel @Inject constructor(
     fun moveOptionsFocus(delta: Int) {
         val state = uiState.value
         val hasGame = state.focusedGame != null
-        val hasDownloadable = state.downloadableGamesCount > 0
+        val hasDownloadable = state.canDownloadCollection
         val optionCount = 2 + (if (hasDownloadable) 1 else 0) + (if (hasGame) 1 else 0)
         val maxIndex = optionCount - 1
         val currentIndex = _modalState.value.optionsModalFocusIndex
@@ -216,8 +243,8 @@ class CollectionDetailViewModel @Inject constructor(
 
     fun confirmOptionSelection() {
         val state = uiState.value
-        val hasDownloadable = state.downloadableGamesCount > 0
-        var idx = _modalState.value.optionsModalFocusIndex
+        val hasDownloadable = state.canDownloadCollection
+        val idx = _modalState.value.optionsModalFocusIndex
 
         val option = if (hasDownloadable) {
             when (idx) {
@@ -237,21 +264,72 @@ class CollectionDetailViewModel @Inject constructor(
     }
 
     fun downloadAllGames() {
+        val progress = _modalState.value.downloadAllProgress
+        if (progress.isActive || progress.isOnCooldown) return
+
         val state = uiState.value
+        if (!state.canDownloadCollection) return
+
         val downloadable = state.games.filter { !it.isDownloaded && it.rommId != null }
         if (downloadable.isEmpty()) return
 
+        _modalState.value = _modalState.value.copy(
+            downloadAllProgress = DownloadAllProgress(
+                isActive = true,
+                currentIndex = 0,
+                totalCount = downloadable.size,
+                isOnCooldown = false
+            )
+        )
+
         viewModelScope.launch {
             var queued = 0
-            for (game in downloadable) {
-                downloadGameUseCase(game.id)
-                queued++
+            var skipped = 0
+            var failed = 0
+            for ((index, game) in downloadable.withIndex()) {
+                _modalState.value = _modalState.value.copy(
+                    downloadAllProgress = _modalState.value.downloadAllProgress.copy(
+                        currentIndex = index + 1
+                    )
+                )
+                when (downloadGameUseCase(game.id)) {
+                    DownloadResult.Queued,
+                    is DownloadResult.MultiDiscQueued -> queued++
+                    DownloadResult.AlreadyDownloaded -> skipped++
+                    is DownloadResult.Error,
+                    is DownloadResult.ExtractionFailed -> failed++
+                }
+                delay(50)
+            }
+
+            _modalState.value = _modalState.value.copy(
+                downloadAllProgress = _modalState.value.downloadAllProgress.copy(
+                    isActive = false,
+                    isOnCooldown = true
+                )
+            )
+
+            val queuedLabel = "$queued game${if (queued == 1) "" else "s"}"
+            val failedLabel = "$failed game${if (failed == 1) "" else "s"}"
+            val skippedLabel = "$skipped game${if (skipped == 1) "" else "s"}"
+            val subtitle = when {
+                queued > 0 && failed > 0 -> "$queuedLabel queued; $failedLabel failed"
+                queued > 0 && skipped > 0 -> "$queuedLabel queued; $skippedLabel already downloaded"
+                queued > 0 -> "$queuedLabel added to download queue"
+                failed > 0 -> "$failedLabel could not be queued"
+                skipped > 0 -> "$skippedLabel already downloaded"
+                else -> "No new downloads queued"
             }
             notificationManager.show(
-                title = "Downloads Queued",
-                subtitle = "$queued game${if (queued > 1) "s" else ""} added to download queue",
-                type = NotificationType.INFO,
+                title = if (queued > 0) "Downloads Queued" else "No Downloads Queued",
+                subtitle = subtitle,
+                type = if (queued > 0) NotificationType.INFO else NotificationType.WARNING,
                 duration = NotificationDuration.MEDIUM
+            )
+
+            delay(DOWNLOAD_ALL_COOLDOWN_MS)
+            _modalState.value = _modalState.value.copy(
+                downloadAllProgress = DownloadAllProgress()
             )
         }
     }
@@ -352,6 +430,7 @@ class CollectionDetailViewModel @Inject constructor(
 
         override fun onUp(): InputResult {
             val state = uiState.value
+            if (state.downloadAllProgress.isActive) return InputResult.HANDLED
             if (hasDialogOpen(state)) return InputResult.UNHANDLED
             when {
                 state.showOptionsModal -> {
@@ -367,6 +446,7 @@ class CollectionDetailViewModel @Inject constructor(
 
         override fun onDown(): InputResult {
             val state = uiState.value
+            if (state.downloadAllProgress.isActive) return InputResult.HANDLED
             if (hasDialogOpen(state)) return InputResult.UNHANDLED
             when {
                 state.showOptionsModal -> {
@@ -382,6 +462,7 @@ class CollectionDetailViewModel @Inject constructor(
 
         override fun onConfirm(): InputResult {
             val state = uiState.value
+            if (state.downloadAllProgress.isActive) return InputResult.HANDLED
             if (hasDialogOpen(state)) return InputResult.UNHANDLED
             when {
                 state.showOptionsModal -> {
@@ -398,6 +479,9 @@ class CollectionDetailViewModel @Inject constructor(
         override fun onBack(): InputResult {
             val state = uiState.value
             when {
+                state.downloadAllProgress.isActive -> {
+                    return InputResult.HANDLED
+                }
                 state.showEditDialog -> {
                     hideEditDialog()
                     return InputResult.HANDLED
@@ -423,17 +507,33 @@ class CollectionDetailViewModel @Inject constructor(
 
         override fun onContextMenu(): InputResult {
             val state = uiState.value
+            if (state.downloadAllProgress.isActive) return InputResult.HANDLED
             if (state.showOptionsModal) return InputResult.HANDLED
             refresh()
             return InputResult.HANDLED
         }
 
+        override fun onMenu(): InputResult {
+            val state = uiState.value
+            if (state.downloadAllProgress.isActive) return InputResult.HANDLED
+            if (state.showOptionsModal || hasDialogOpen(state)) return InputResult.HANDLED
+            if (state.canDownloadCollection) {
+                downloadAllGames()
+                return InputResult.HANDLED
+            }
+            return InputResult.UNHANDLED
+        }
+
         override fun onSelect(): InputResult {
+            val state = uiState.value
+            if (state.downloadAllProgress.isActive) return InputResult.HANDLED
+            if (state.showOptionsModal || hasDialogOpen(state)) return InputResult.HANDLED
             showOptionsModal()
             return InputResult.HANDLED
         }
 
         override fun onSecondaryAction(): InputResult {
+            if (uiState.value.downloadAllProgress.isActive) return InputResult.HANDLED
             togglePin()
             return InputResult.HANDLED
         }

@@ -32,7 +32,7 @@ fun CollectionOptionsModal(
         if (showDownloadAll && downloadableCount > 0) {
             OptionItem(
                 icon = Icons.Default.Download,
-                label = "Download All ($downloadableCount)",
+                label = "Download Collection ($downloadableCount)",
                 isFocused = focusIndex == currentIndex,
                 onClick = { onOptionSelect(CollectionOption.DOWNLOAD_ALL) }
             )

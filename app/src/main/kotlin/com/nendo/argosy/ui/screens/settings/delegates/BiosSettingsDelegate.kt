@@ -1,5 +1,8 @@
 package com.nendo.argosy.ui.screens.settings.delegates
 
+import com.nendo.argosy.core.notification.NotificationDuration
+import com.nendo.argosy.core.notification.NotificationManager
+import com.nendo.argosy.core.notification.NotificationType
 import com.nendo.argosy.data.emulator.EmulatorRegistry
 import com.nendo.argosy.data.emulator.GpuDriverManager
 import com.nendo.argosy.data.local.dao.FirmwareDao
@@ -29,7 +32,8 @@ class BiosSettingsDelegate @Inject constructor(
     private val firmwareDao: FirmwareDao,
     private val platformRepository: PlatformRepository,
     private val preferencesRepository: UserPreferencesRepository,
-    private val gpuDriverManager: GpuDriverManager
+    private val gpuDriverManager: GpuDriverManager,
+    private val notificationManager: NotificationManager
 ) {
     private val _state = MutableStateFlow(BiosState())
     val state: StateFlow<BiosState> = _state.asStateFlow()
@@ -90,7 +94,8 @@ class BiosSettingsDelegate @Inject constructor(
                 platformGroups = platformGroups,
                 totalFiles = totalFiles,
                 downloadedFiles = downloadedFiles,
-                customBiosPath = prefs.customBiosPath
+                customBiosPath = prefs.customBiosPath,
+                actionIndex = if (totalFiles == 0 && it.actionIndex < 2) 2 else it.actionIndex.coerceIn(0, 2)
             )
         }
     }
@@ -103,7 +108,7 @@ class BiosSettingsDelegate @Inject constructor(
     }
 
     fun downloadAllBios(scope: CoroutineScope) {
-        if (_state.value.isDownloading) return
+        if (_state.value.isDownloading || _state.value.isScanningLocalBios) return
         scope.launch {
             _state.update { it.copy(isDownloading = true, downloadProgress = 0f) }
 
@@ -136,7 +141,7 @@ class BiosSettingsDelegate @Inject constructor(
     }
 
     fun downloadBiosForPlatform(platformSlug: String, scope: CoroutineScope) {
-        if (_state.value.isDownloading) return
+        if (_state.value.isDownloading || _state.value.isScanningLocalBios) return
         scope.launch {
             _state.update { it.copy(isDownloading = true, downloadProgress = 0f) }
 
@@ -174,7 +179,7 @@ class BiosSettingsDelegate @Inject constructor(
     }
 
     fun downloadSingleBios(rommId: Long, scope: CoroutineScope) {
-        if (_state.value.isDownloading) return
+        if (_state.value.isDownloading || _state.value.isScanningLocalBios) return
         scope.launch {
             val firmware = firmwareDao.getByRommId(rommId) ?: return@launch
 
@@ -203,7 +208,7 @@ class BiosSettingsDelegate @Inject constructor(
     }
 
     fun distributeAllBios(scope: CoroutineScope) {
-        if (_state.value.isDistributing) return
+        if (_state.value.isDistributing || _state.value.isScanningLocalBios) return
         scope.launch {
             _state.update { it.copy(isDistributing = true) }
 
@@ -249,6 +254,66 @@ class BiosSettingsDelegate @Inject constructor(
             if (shouldPromptGpuDriver) {
                 fetchGpuDriverInfo(scope)
             }
+        }
+    }
+
+    fun scanLocalBiosFiles(scope: CoroutineScope) {
+        if (_state.value.isScanningLocalBios || _state.value.isDownloading || _state.value.isDistributing) return
+        scope.launch {
+            _state.update {
+                it.copy(
+                    isScanningLocalBios = true,
+                    scanningBiosFileName = null,
+                    localBiosScanProgress = 0f
+                )
+            }
+
+            val result = try {
+                biosRepository.scanLocalBiosFiles { current, total, fileName ->
+                    _state.update {
+                        it.copy(
+                            scanningBiosFileName = fileName,
+                            localBiosScanProgress = if (total > 0) current.toFloat() / total else 0f
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        isScanningLocalBios = false,
+                        scanningBiosFileName = null,
+                        localBiosScanProgress = 0f
+                    )
+                }
+                notificationManager.show(
+                    title = "BIOS Scan Failed",
+                    subtitle = e.message ?: "Could not scan local storage",
+                    type = NotificationType.ERROR,
+                    duration = NotificationDuration.LONG
+                )
+                return@launch
+            }
+
+            _state.update {
+                it.copy(
+                    isScanningLocalBios = false,
+                    scanningBiosFileName = null,
+                    localBiosScanProgress = 0f
+                )
+            }
+            loadBiosState()
+
+            val subtitle = if (result.importedFiles > 0) {
+                "${result.importedFiles} file${if (result.importedFiles == 1) "" else "s"} imported"
+            } else {
+                "No matching BIOS files found"
+            }
+            notificationManager.show(
+                title = "BIOS Scan Complete",
+                subtitle = subtitle,
+                type = if (result.importedFiles > 0) NotificationType.SUCCESS else NotificationType.INFO,
+                duration = NotificationDuration.MEDIUM
+            )
         }
     }
 
@@ -310,8 +375,7 @@ class BiosSettingsDelegate @Inject constructor(
 
     fun moveActionFocus(delta: Int) {
         _state.update { state ->
-            // Both buttons are shown when totalFiles > 0, allow navigation between them
-            val maxIndex = if (state.totalFiles > 0) 1 else 0
+            val maxIndex = 2
             val newIndex = (state.actionIndex + delta).coerceIn(0, maxIndex)
             state.copy(actionIndex = newIndex)
         }

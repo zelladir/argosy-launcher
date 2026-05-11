@@ -19,6 +19,9 @@ class EmulatorConfigRepository @Inject constructor(
     suspend fun getGlobalDefault(): EmulatorConfigEntity? =
         emulatorConfigDao.getGlobalDefault()
 
+    suspend fun clearGlobalDefaults() =
+        emulatorConfigDao.clearGlobalDefaults()
+
     fun observePlatformConfigs(platformId: Long): Flow<List<EmulatorConfigEntity>> =
         emulatorConfigDao.observePlatformConfigs(platformId)
 

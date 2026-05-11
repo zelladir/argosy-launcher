@@ -43,7 +43,10 @@ import com.nendo.argosy.ui.screens.settings.sections.boxArtMaxFocusIndex
 import com.nendo.argosy.ui.screens.settings.sections.builtinControlsMaxFocusIndex
 import com.nendo.argosy.ui.screens.settings.sections.builtinVideoMaxFocusIndex
 import com.nendo.argosy.ui.screens.settings.sections.controlsMaxFocusIndex
+import com.nendo.argosy.ui.screens.settings.sections.createEmulatorsLayoutInfo
 import com.nendo.argosy.ui.screens.settings.sections.emulatorsMaxFocusIndex
+import com.nendo.argosy.ui.screens.settings.sections.emulatorsItemAtFocusIndex
+import com.nendo.argosy.ui.screens.settings.sections.EmulatorsItem
 import com.nendo.argosy.ui.screens.settings.sections.homeScreenMaxFocusIndex
 import com.nendo.argosy.ui.screens.settings.sections.interfaceMaxFocusIndex
 import com.nendo.argosy.ui.screens.settings.sections.mainSettingsMaxFocusIndex
@@ -432,14 +435,12 @@ private fun routeControlsConfirm(vm: SettingsViewModel, state: SettingsUiState):
 }
 
 private fun routeEmulatorsConfirm(vm: SettingsViewModel, state: SettingsUiState): InputResult {
-    when {
-        state.focusedIndex == 0 -> vm.forceCheckEmulatorUpdates()
-        state.focusedIndex >= 1 -> {
-            val platformIndex = state.focusedIndex - 1
-            if (platformIndex < state.emulators.platforms.size) {
-                vm.navigateToPlatformDetail(platformIndex)
-            }
-        }
+    val info = createEmulatorsLayoutInfo(state.emulators.platforms)
+    when (val item = emulatorsItemAtFocusIndex(state.focusedIndex, info)) {
+        EmulatorsItem.CheckForUpdates -> vm.forceCheckEmulatorUpdates()
+        EmulatorsItem.DefaultToRetroArch -> vm.defaultAllToRetroArch()
+        is EmulatorsItem.PlatformItem -> vm.navigateToPlatformDetail(item.index)
+        else -> {}
     }
     return InputResult.HANDLED
 }
@@ -449,10 +450,12 @@ private fun routeBiosConfirm(vm: SettingsViewModel, state: SettingsUiState): Inp
     when (val item = biosItemAtFocusIndex(state.focusedIndex, bios.platformGroups, bios.expandedPlatformIndex)) {
         BiosItem.Summary -> {
             val actionIndex = bios.actionIndex
-            if (actionIndex == 0) {
+            if (actionIndex == 0 && bios.totalFiles > 0) {
                 vm.downloadAllBios()
             } else if (actionIndex == 1 && bios.downloadedFiles > 0) {
                 vm.distributeAllBios()
+            } else if (actionIndex == 2) {
+                vm.scanLocalBiosFiles()
             }
         }
         BiosItem.BiosPath -> {

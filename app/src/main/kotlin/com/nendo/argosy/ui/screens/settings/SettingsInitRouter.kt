@@ -269,6 +269,7 @@ internal fun routeLoadSettings(vm: SettingsViewModel) {
         val prefs = vm.preferencesRepository.preferences.first()
         val installedEmulators = vm.emulatorDetector.detectEmulators()
         val platforms = vm.platformRepository.observeAllPlatforms().first()
+        val globalDefaultConfig = vm.emulatorConfigRepo.getGlobalDefault()
 
         val installedPackages = installedEmulators.map { it.def.packageName }.toSet()
 
@@ -287,13 +288,19 @@ internal fun routeLoadSettings(vm: SettingsViewModel) {
                 .filter { it.packageName !in installedPackages && it.downloadUrl != null }
 
             val rawSelectedEmulatorDef = defaultConfig?.packageName?.let { vm.emulatorDetector.getByPackage(it) }
-            val selectedEmulatorDef = if (!prefs.builtinLibretroEnabled && rawSelectedEmulatorDef?.id == "builtin") {
+            val platformSelectedEmulatorDef = if (!prefs.builtinLibretroEnabled && rawSelectedEmulatorDef?.id == "builtin") {
                 null
             } else {
                 rawSelectedEmulatorDef
             }
+            val globalSelectedEmulatorDef = globalDefaultConfig
+                ?.takeIf { platformSelectedEmulatorDef == null }
+                ?.packageName
+                ?.let { packageName -> installedEmulators.find { it.def.packageName == packageName }?.def }
+                ?.takeIf { canonicalSlug in it.supportedPlatforms }
+                ?.takeIf { prefs.builtinLibretroEnabled || it.packageName != EmulatorRegistry.BUILTIN_PACKAGE }
             val autoResolvedEmulator = vm.emulatorDetector.getPreferredEmulator(platform.slug, prefs.builtinLibretroEnabled)?.def
-            val effectiveEmulatorDef = selectedEmulatorDef ?: autoResolvedEmulator
+            val effectiveEmulatorDef = platformSelectedEmulatorDef ?: globalSelectedEmulatorDef ?: autoResolvedEmulator
             val isRetroArch = effectiveEmulatorDef?.launchConfig is com.nendo.argosy.data.emulator.LaunchConfig.RetroArch
             val hasCoreSelection = effectiveEmulatorDef?.launchConfig?.isCoreSelectable == true
             val availableCores = if (hasCoreSelection) {
@@ -342,8 +349,8 @@ internal fun routeLoadSettings(vm: SettingsViewModel) {
 
             PlatformEmulatorConfig(
                 platform = platform,
-                selectedEmulator = defaultConfig?.displayName,
-                selectedEmulatorPackage = defaultConfig?.packageName,
+                selectedEmulator = defaultConfig?.displayName ?: globalSelectedEmulatorDef?.displayName,
+                selectedEmulatorPackage = defaultConfig?.packageName ?: globalSelectedEmulatorDef?.packageName,
                 selectedCore = selectedCore,
                 isUserConfigured = isUserConfigured,
                 availableEmulators = available,

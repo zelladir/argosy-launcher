@@ -29,13 +29,6 @@ import kotlinx.coroutines.launch
 import java.net.URLDecoder
 import javax.inject.Inject
 
-data class DownloadAllProgress(
-    val isActive: Boolean = false,
-    val currentIndex: Int = 0,
-    val totalCount: Int = 0,
-    val isOnCooldown: Boolean = false
-)
-
 data class VirtualCategoryUiState(
     val type: String = "",
     val categoryName: String = "",

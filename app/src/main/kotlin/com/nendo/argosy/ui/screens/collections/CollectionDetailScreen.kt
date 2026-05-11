@@ -15,11 +15,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -78,7 +83,7 @@ fun CollectionDetailScreen(
     val uiState by viewModel.uiState.collectAsState()
     val listState = rememberLazyListState()
 
-    LaunchedEffect(uiState.focusedIndex) {
+    LaunchedEffect(uiState.focusedGame?.id, uiState.focusedIndex) {
         if (uiState.games.isNotEmpty() && uiState.focusedIndex in uiState.games.indices) {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
             val viewportHeight = listState.layoutInfo.viewportEndOffset
@@ -95,7 +100,10 @@ fun CollectionDetailScreen(
             CollectionDetailHeader(
                 collectionName = uiState.collection?.name ?: "",
                 gameCount = uiState.games.size,
-                onBack = onBack
+                downloadableCount = uiState.downloadableGamesCount,
+                canDownloadCollection = uiState.canDownloadCollection,
+                onBack = onBack,
+                onDownloadCollection = { viewModel.downloadAllGames() }
             )
 
             when {
@@ -158,6 +166,11 @@ fun CollectionDetailScreen(
         } else {
             emptyList()
         }
+        val downloadHint = if (uiState.canDownloadCollection) {
+            listOf(InputButton.START to "Download (${uiState.downloadableGamesCount})")
+        } else {
+            emptyList()
+        }
         val optionsHint = if (uiState.collection != null) {
             listOf(InputButton.SELECT to "Options")
         } else {
@@ -165,8 +178,15 @@ fun CollectionDetailScreen(
         }
         FooterBar(
             modifier = Modifier.align(Alignment.BottomCenter),
-            hints = baseHints + pinHint + optionsHint
+            hints = baseHints + downloadHint + pinHint + optionsHint
         )
+
+        if (uiState.downloadAllProgress.isActive) {
+            DownloadCollectionModal(
+                currentIndex = uiState.downloadAllProgress.currentIndex,
+                totalCount = uiState.downloadAllProgress.totalCount
+            )
+        }
     }
 
     if (uiState.showEditDialog && uiState.collection != null) {
@@ -191,7 +211,7 @@ fun CollectionDetailScreen(
             focusIndex = uiState.optionsModalFocusIndex,
             onOptionSelect = { option -> viewModel.selectOption(option) },
             onDismiss = { viewModel.hideOptionsModal() },
-            showDownloadAll = true,
+            showDownloadAll = uiState.canDownloadCollection,
             downloadableCount = uiState.downloadableGamesCount,
             showRemoveGame = uiState.focusedGame != null,
             gameTitle = uiState.focusedGame?.title
@@ -212,7 +232,10 @@ fun CollectionDetailScreen(
 private fun CollectionDetailHeader(
     collectionName: String,
     gameCount: Int,
-    onBack: () -> Unit
+    downloadableCount: Int,
+    canDownloadCollection: Boolean,
+    onBack: () -> Unit,
+    onDownloadCollection: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -241,6 +264,82 @@ private fun CollectionDetailHeader(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+
+        if (downloadableCount > 0) {
+            IconButton(
+                onClick = onDownloadCollection,
+                enabled = canDownloadCollection
+            ) {
+                Icon(
+                    Icons.Default.Download,
+                    contentDescription = "Download collection",
+                    tint = if (canDownloadCollection) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadCollectionModal(
+    currentIndex: Int,
+    totalCount: Int
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(Dimens.spacingXl),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            shape = RoundedCornerShape(Dimens.radiusXl),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = Dimens.elevationLg)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(Dimens.spacingLg)
+                    .width(Dimens.modalWidthLg - 170.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = null,
+                    modifier = Modifier.size(Dimens.iconXl),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                Spacer(modifier = Modifier.height(Dimens.spacingMd))
+
+                Text(
+                    text = "Queuing Downloads",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                Spacer(modifier = Modifier.height(Dimens.spacingSm))
+
+                Text(
+                    text = "$currentIndex of $totalCount games",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(Dimens.spacingMd))
+
+                LinearProgressIndicator(
+                    progress = { if (totalCount > 0) currentIndex.toFloat() / totalCount else 0f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
         }
     }
 }

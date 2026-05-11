@@ -12,6 +12,7 @@ import com.nendo.argosy.data.preferences.UserPreferencesRepository
 import com.nendo.argosy.data.remote.romm.RomMApi
 import com.nendo.argosy.data.remote.romm.RomMFirmware
 import com.nendo.argosy.data.remote.romm.RomMResult
+import com.nendo.argosy.data.storage.StoragePathUtils
 import com.nendo.argosy.util.AppPaths
 import com.nendo.argosy.util.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -30,6 +31,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.ArrayDeque
 import java.util.UUID
 import java.util.zip.ZipInputStream
 import javax.inject.Inject
@@ -37,6 +39,9 @@ import javax.inject.Singleton
 
 private const val TAG = "BiosRepository"
 private const val BIOS_INTERNAL_DIR = "bios"
+private const val MAX_BIOS_SCAN_DEPTH = 4
+private const val MAX_BIOS_SCAN_FILES = 5000
+private const val MAX_BIOS_HASH_BYTES = 64L * 1024L * 1024L
 
 data class BiosPlatformStatus(
     val platformSlug: String,
@@ -60,6 +65,12 @@ sealed class BiosDownloadResult {
     data class Error(val message: String) : BiosDownloadResult()
 }
 
+data class LocalBiosScanResult(
+    val scannedFiles: Int,
+    val matchedFiles: Int,
+    val importedFiles: Int
+)
+
 @Singleton
 class BiosRepository @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -69,6 +80,16 @@ class BiosRepository @Inject constructor(
     private val switchKeyManager: SwitchKeyManager
 ) {
     private var api: RomMApi? = null
+
+    private data class BiosScanTarget(
+        val platformId: Long,
+        val platformSlug: String,
+        val fileName: String,
+        val md5Hash: String?,
+        val existingId: Long?
+    ) {
+        val key: String = "$platformId:${fileName.lowercase()}"
+    }
 
     fun setApi(api: RomMApi?) {
         this.api = api
@@ -117,6 +138,257 @@ class BiosRepository @Inject constructor(
         val dir = AppPaths.libretroSystemDir(context.filesDir)
         if (!dir.exists()) dir.mkdirs()
         return dir
+    }
+
+    suspend fun scanLocalBiosFiles(
+        onProgress: ((current: Int, total: Int, fileName: String) -> Unit)? = null
+    ): LocalBiosScanResult = withContext(Dispatchers.IO) {
+        val targets = buildLocalBiosScanTargets()
+        if (targets.isEmpty()) {
+            Logger.info(TAG, "Local BIOS scan skipped: no known BIOS targets")
+            return@withContext LocalBiosScanResult(scannedFiles = 0, matchedFiles = 0, importedFiles = 0)
+        }
+
+        val expectedNames = targets.flatMap { it.matchNames() }.toSet()
+        val expectedMd5s = targets.mapNotNull { it.md5Hash?.lowercase() }.toSet()
+        val candidates = collectLocalBiosCandidates(getLocalBiosScanRoots(), expectedNames)
+
+        var matched = 0
+        var imported = 0
+        val importedTargets = mutableSetOf<String>()
+
+        candidates.forEachIndexed { index, file ->
+            onProgress?.invoke(index + 1, candidates.size, file.name)
+
+            val lowerName = file.name.lowercase()
+            var md5: String? = null
+            fun fileMd5(): String? {
+                if (md5 == null && file.length() in 1L..MAX_BIOS_HASH_BYTES) {
+                    md5 = try {
+                        calculateMd5(file)
+                    } catch (e: Exception) {
+                        Logger.debug(TAG, "Could not hash candidate BIOS file ${file.absolutePath}: ${e.message}")
+                        ""
+                    }
+                }
+                return md5?.takeIf { it.isNotEmpty() }
+            }
+
+            val nameMatches = targets.filter { target ->
+                target.key !in importedTargets &&
+                    lowerName in target.matchNames() &&
+                    (target.md5Hash == null || fileMd5()?.equals(target.md5Hash, ignoreCase = true) == true)
+            }
+
+            val md5Matches = if (expectedMd5s.isNotEmpty()) {
+                fileMd5()?.let { actualMd5 ->
+                    targets.filter { target ->
+                        target.key !in importedTargets &&
+                            target.md5Hash?.equals(actualMd5, ignoreCase = true) == true
+                    }
+                }.orEmpty()
+            } else {
+                emptyList()
+            }
+
+            val matches = (nameMatches + md5Matches).distinctBy { it.key }
+            if (matches.isEmpty()) return@forEachIndexed
+
+            for (target in matches) {
+                matched++
+                if (importLocalBiosFile(target, file)) {
+                    imported++
+                    importedTargets.add(target.key)
+                }
+            }
+        }
+
+        Logger.info(
+            TAG,
+            "Local BIOS scan complete: scanned=${candidates.size}, matched=$matched, imported=$imported"
+        )
+        LocalBiosScanResult(
+            scannedFiles = candidates.size,
+            matchedFiles = matched,
+            importedFiles = imported
+        )
+    }
+
+    private suspend fun buildLocalBiosScanTargets(): List<BiosScanTarget> {
+        val targets = LinkedHashMap<String, BiosScanTarget>()
+        val existingFirmware = firmwareDao.getSyncEnabledAll()
+        for (firmware in existingFirmware) {
+            val target = BiosScanTarget(
+                platformId = firmware.platformId,
+                platformSlug = firmware.platformSlug,
+                fileName = firmware.fileName,
+                md5Hash = firmware.md5Hash,
+                existingId = firmware.id
+            )
+            targets[target.key] = target
+        }
+
+        val existingKeys = targets.keys.toSet()
+        val platforms = platformDao.getAllPlatforms()
+        for (platform in platforms) {
+            val canonicalSlug = PlatformDefinitions.getCanonicalSlug(platform.slug)
+            val requirements = BiosPathRegistry.getBiosRequirements(canonicalSlug)
+            for (requirement in requirements) {
+                val target = BiosScanTarget(
+                    platformId = platform.id,
+                    platformSlug = platform.slug,
+                    fileName = requirement.fileName,
+                    md5Hash = requirement.md5Hash,
+                    existingId = null
+                )
+                if (target.key !in existingKeys) {
+                    targets.putIfAbsent(target.key, target)
+                }
+            }
+        }
+
+        return targets.values.toList()
+    }
+
+    private suspend fun getLocalBiosScanRoots(): List<File> {
+        val prefs = userPreferencesRepository.preferences.first()
+        val primaryRoot = StoragePathUtils.primaryExternalRoot
+        val roots = buildList {
+            prefs.customBiosPath?.let { path ->
+                add(resolveBiosDir(path))
+                add(File(path))
+            }
+            add(getInternalBiosDir())
+            add(getLibretroSystemDir())
+            add(File(primaryRoot, "RetroArch/system"))
+            add(File(primaryRoot, "BIOS"))
+            add(File(primaryRoot, "bios"))
+            add(File(primaryRoot, "Roms/BIOS"))
+            add(File(primaryRoot, "Roms/bios"))
+            add(File(primaryRoot, "ROMs/BIOS"))
+            add(File(primaryRoot, "ROMs/bios"))
+            add(File(primaryRoot, "Download"))
+            add(File(primaryRoot, "Downloads"))
+            BiosPathRegistry.getAllBiosConfigs().values.forEach { config ->
+                config.defaultPaths.forEach { add(File(it)) }
+            }
+        }
+
+        return roots
+            .filter { it.exists() }
+            .distinctBy { StoragePathUtils.canonicalize(it.absolutePath).lowercase() }
+    }
+
+    private fun collectLocalBiosCandidates(
+        roots: List<File>,
+        expectedNames: Set<String>
+    ): List<File> {
+        val candidates = LinkedHashMap<String, File>()
+        for (root in roots) {
+            if (candidates.size >= MAX_BIOS_SCAN_FILES) break
+            if (root.isFile) {
+                if (isLikelyBiosCandidate(root, expectedNames)) {
+                    candidates[StoragePathUtils.canonicalize(root.absolutePath)] = root
+                }
+                continue
+            }
+            if (!root.isDirectory) continue
+
+            val queue = ArrayDeque<Pair<File, Int>>()
+            queue.add(root to 0)
+            while (queue.isNotEmpty() && candidates.size < MAX_BIOS_SCAN_FILES) {
+                val (dir, depth) = queue.removeFirst()
+                val children = try {
+                    dir.listFiles()
+                } catch (e: Exception) {
+                    Logger.debug(TAG, "Could not scan BIOS directory ${dir.absolutePath}: ${e.message}")
+                    null
+                } ?: continue
+
+                for (child in children) {
+                    if (child.isDirectory) {
+                        if (depth < MAX_BIOS_SCAN_DEPTH && !shouldSkipBiosScanDir(child)) {
+                            queue.add(child to depth + 1)
+                        }
+                    } else if (child.isFile && isLikelyBiosCandidate(child, expectedNames)) {
+                        candidates[StoragePathUtils.canonicalize(child.absolutePath)] = child
+                        if (candidates.size >= MAX_BIOS_SCAN_FILES) break
+                    }
+                }
+            }
+        }
+        return candidates.values.toList()
+    }
+
+    private fun isLikelyBiosCandidate(file: File, expectedNames: Set<String>): Boolean {
+        val lowerName = file.name.lowercase()
+        if (lowerName in expectedNames) return true
+        val extension = file.extension.lowercase()
+        return extension in setOf(
+            "bin", "rom", "img", "zip", "7z", "keys", "pce", "ic1", "dat", "nca"
+        )
+    }
+
+    private fun shouldSkipBiosScanDir(dir: File): Boolean {
+        val name = dir.name.lowercase()
+        return name.startsWith(".") ||
+            name in setOf(
+                "cache", "code_cache", "shader", "shaders", "screenshots",
+                "thumbnails", "movies", "music", "podcasts"
+            )
+    }
+
+    private suspend fun importLocalBiosFile(target: BiosScanTarget, sourceFile: File): Boolean {
+        return try {
+            val platformDir = getInternalBiosPlatformDir(target.platformSlug)
+            val targetFile = File(platformDir, target.fileName)
+            targetFile.parentFile?.mkdirs()
+            if (StoragePathUtils.canonicalize(sourceFile.absolutePath) != StoragePathUtils.canonicalize(targetFile.absolutePath)) {
+                sourceFile.copyTo(targetFile, overwrite = true)
+            }
+
+            val now = Instant.now()
+            val existingId = target.existingId
+                ?: firmwareDao.getByPlatformAndFileName(target.platformId, target.fileName)?.id
+            if (existingId != null) {
+                firmwareDao.updateLocalPath(existingId, targetFile.absolutePath, now)
+            } else {
+                firmwareDao.upsert(
+                    FirmwareEntity(
+                        platformId = target.platformId,
+                        platformSlug = target.platformSlug,
+                        rommId = localBiosRommId(target.platformId, target.fileName),
+                        fileName = target.fileName,
+                        filePath = targetFile.absolutePath,
+                        fileSizeBytes = targetFile.length(),
+                        md5Hash = target.md5Hash,
+                        sha1Hash = null,
+                        localPath = targetFile.absolutePath,
+                        downloadedAt = now,
+                        lastVerifiedAt = now
+                    )
+                )
+            }
+            Logger.info(TAG, "Imported local BIOS ${sourceFile.name} for ${target.platformSlug}")
+            true
+        } catch (e: Exception) {
+            Logger.error(TAG, "Failed to import local BIOS ${sourceFile.absolutePath}", e)
+            false
+        }
+    }
+
+    private fun localBiosRommId(platformId: Long, fileName: String): Long {
+        val hash = "$platformId:${fileName.lowercase()}".hashCode().toLong()
+        return -kotlin.math.abs(hash) - 1L
+    }
+
+    private fun BiosScanTarget.matchNames(): Set<String> = buildSet {
+        add(fileName.lowercase())
+        add(File(fileName).name.lowercase())
+        BiosPathRegistry.getRetroArchBiosName(md5Hash)?.let { retroArchName ->
+            add(retroArchName.lowercase())
+            add(File(retroArchName).name.lowercase())
+        }
     }
 
     suspend fun syncPlatformFirmware(

@@ -1,6 +1,7 @@
 package com.nendo.argosy.data.emulator
 
 import com.nendo.argosy.data.local.dao.EmulatorConfigDao
+import com.nendo.argosy.data.platform.PlatformDefinitions
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -16,11 +17,18 @@ class EmulatorResolver @Inject constructor(
     }
 
     suspend fun getEmulatorPackageForGame(gameId: Long, platformId: Long, platformSlug: String): String? {
-        val config = emulatorConfigDao.getByGameId(gameId)
-            ?: emulatorConfigDao.getDefaultForPlatform(platformId)
-        if (config?.packageName != null) return config.packageName
+        emulatorConfigDao.getByGameId(gameId)?.packageName?.let { return it }
+        emulatorConfigDao.getDefaultForPlatform(platformId)?.packageName?.let { return it }
         if (emulatorDetector.installedEmulators.value.isEmpty()) {
             emulatorDetector.detectEmulators()
+        }
+        val canonicalSlug = PlatformDefinitions.getCanonicalSlug(platformSlug)
+        val globalDefault = emulatorConfigDao.getGlobalDefault()
+        val globalEmulator = globalDefault?.packageName?.let { packageName ->
+            emulatorDetector.installedEmulators.value.find { it.def.packageName == packageName }
+        }
+        if (globalEmulator != null && canonicalSlug in globalEmulator.def.supportedPlatforms) {
+            return globalEmulator.def.packageName
         }
         return emulatorDetector.getPreferredEmulator(platformSlug)?.def?.packageName
     }

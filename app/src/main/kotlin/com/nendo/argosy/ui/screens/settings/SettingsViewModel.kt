@@ -9,6 +9,7 @@ import com.nendo.argosy.data.cache.ImageCacheProgress
 import com.nendo.argosy.data.emulator.EmulatorDetector
 import com.nendo.argosy.data.emulator.InstalledEmulator
 import com.nendo.argosy.data.emulator.RetroArchConfigParser
+import com.nendo.argosy.data.platform.PlatformDefinitions
 import com.nendo.argosy.data.repository.CoreOptionsRepository
 import com.nendo.argosy.data.repository.EmulatorConfigRepository
 import com.nendo.argosy.data.repository.LibretroSettingsRepository
@@ -895,6 +896,54 @@ class SettingsViewModel @Inject constructor(
     fun setPlatformEmulator(platformId: Long, platformSlug: String, emulator: InstalledEmulator?) =
         routeSetPlatformEmulator(this, platformId, platformSlug, emulator)
 
+    fun defaultAllToRetroArch() {
+        viewModelScope.launch {
+            val currentInstalled = emulatorDetector.installedEmulators.value
+            val installed = if (currentInstalled.isNotEmpty()) currentInstalled else emulatorDetector.detectEmulators()
+            val retroArch = installed.firstOrNull { it.def.id == "retroarch_64" }
+                ?: installed.firstOrNull { it.def.id == "retroarch" }
+                ?: installed.firstOrNull {
+                    it.def.packageName.startsWith("com.retroarch") ||
+                        it.def.launchConfig is com.nendo.argosy.data.emulator.LaunchConfig.RetroArch
+                }
+
+            if (retroArch == null) {
+                notificationManager.show(
+                    title = "RetroArch Not Found",
+                    subtitle = "Install RetroArch, then run this again.",
+                    type = com.nendo.argosy.core.notification.NotificationType.ERROR,
+                    duration = com.nendo.argosy.core.notification.NotificationDuration.MEDIUM
+                )
+                return@launch
+            }
+
+            configureEmulatorUseCase.setGlobalDefault(retroArch)
+
+            val platforms = platformRepository.getAllPlatforms()
+            var updated = 0
+            var skipped = 0
+            for (platform in platforms) {
+                val canonicalSlug = PlatformDefinitions.getCanonicalSlug(platform.slug)
+                if (canonicalSlug in retroArch.def.supportedPlatforms) {
+                    configureEmulatorUseCase.setForPlatform(platform.id, platform.slug, retroArch)
+                    updated++
+                } else {
+                    skipped++
+                }
+            }
+
+            loadSettings()
+            val subtitle = "$updated platform${if (updated == 1) "" else "s"} updated" +
+                (if (skipped > 0) ", $skipped unsupported" else "")
+            notificationManager.show(
+                title = "RetroArch Applied",
+                subtitle = subtitle,
+                type = com.nendo.argosy.core.notification.NotificationType.SUCCESS,
+                duration = com.nendo.argosy.core.notification.NotificationDuration.MEDIUM
+            )
+        }
+    }
+
     fun setRomStoragePath(path: String) = storageDelegate.setRomStoragePath(viewModelScope, path)
 
     fun syncRomm() = routeSyncRomm(this)
@@ -931,6 +980,7 @@ class SettingsViewModel @Inject constructor(
 
     fun downloadAllBios() = biosDelegate.downloadAllBios(viewModelScope)
     fun distributeAllBios() = biosDelegate.distributeAllBios(viewModelScope)
+    fun scanLocalBiosFiles() = biosDelegate.scanLocalBiosFiles(viewModelScope)
 
     fun distributeBiosForPlatformWithNotification(platformSlug: String) {
         val config = _uiState.value.emulators.platforms

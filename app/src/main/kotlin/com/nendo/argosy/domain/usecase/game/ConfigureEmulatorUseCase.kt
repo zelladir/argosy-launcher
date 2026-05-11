@@ -41,6 +41,22 @@ class ConfigureEmulatorUseCase @Inject constructor(
         }
     }
 
+    suspend fun setGlobalDefault(emulator: InstalledEmulator?) {
+        emulatorConfigDao.clearGlobalDefaults()
+
+        if (emulator != null) {
+            val config = EmulatorConfigEntity(
+                platformId = null,
+                gameId = null,
+                packageName = emulator.def.packageName,
+                displayName = emulator.def.displayName,
+                coreName = null,
+                isDefault = true
+            )
+            emulatorConfigDao.insert(config)
+        }
+    }
+
     suspend fun setAdHocForPlatform(platformId: Long, packageName: String, displayName: String) {
         emulatorConfigDao.clearPlatformDefaults(platformId)
         val config = EmulatorConfigEntity(

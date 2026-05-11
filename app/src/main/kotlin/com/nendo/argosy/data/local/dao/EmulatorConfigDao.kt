@@ -19,6 +19,9 @@ interface EmulatorConfigDao {
     @Query("SELECT * FROM emulator_configs WHERE platformId IS NULL AND gameId IS NULL AND isDefault = 1 LIMIT 1")
     suspend fun getGlobalDefault(): EmulatorConfigEntity?
 
+    @Query("DELETE FROM emulator_configs WHERE platformId IS NULL AND gameId IS NULL")
+    suspend fun clearGlobalDefaults()
+
     @Query("SELECT * FROM emulator_configs WHERE platformId = :platformId AND gameId IS NULL")
     fun observePlatformConfigs(platformId: Long): Flow<List<EmulatorConfigEntity>>
 

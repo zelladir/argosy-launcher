@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -171,10 +172,14 @@ fun BiosSection(uiState: SettingsUiState, viewModel: SettingsViewModel) {
                     downloadingFileName = bios.downloadingFileName,
                     downloadProgress = bios.downloadProgress,
                     isDistributing = bios.isDistributing,
+                    isScanningLocalBios = bios.isScanningLocalBios,
+                    scanningBiosFileName = bios.scanningBiosFileName,
+                    localBiosScanProgress = bios.localBiosScanProgress,
                     isFocused = isFocused(item),
                     actionIndex = bios.actionIndex,
                     onDownloadAll = { viewModel.downloadAllBios() },
-                    onDistributeAll = { viewModel.distributeAllBios() }
+                    onDistributeAll = { viewModel.distributeAllBios() },
+                    onScanLocal = { viewModel.scanLocalBiosFiles() }
                 )
 
                 BiosItem.BiosPath -> {
@@ -217,7 +222,7 @@ fun BiosSection(uiState: SettingsUiState, viewModel: SettingsViewModel) {
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "No BIOS files synced yet. Sync your library to discover available firmware.",
+                            text = "No BIOS files synced yet. Sync your library or scan disk for known BIOS files.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -516,10 +521,14 @@ private fun BiosSummaryCard(
     downloadingFileName: String?,
     downloadProgress: Float,
     isDistributing: Boolean,
+    isScanningLocalBios: Boolean,
+    scanningBiosFileName: String?,
+    localBiosScanProgress: Float,
     isFocused: Boolean,
     actionIndex: Int,
     onDownloadAll: () -> Unit,
-    onDistributeAll: () -> Unit
+    onDistributeAll: () -> Unit,
+    onScanLocal: () -> Unit
 ) {
     val backgroundColor = if (isFocused) {
         MaterialTheme.colorScheme.primaryContainer
@@ -616,13 +625,30 @@ private fun BiosSummaryCard(
             }
         }
 
-        if (totalFiles > 0 && !isDownloading && !isDistributing) {
+        if (isScanningLocalBios) {
+            Spacer(modifier = Modifier.height(Dimens.spacingSm))
+            Text(
+                text = "Scanning: ${scanningBiosFileName ?: "..."}",
+                style = MaterialTheme.typography.bodySmall,
+                color = contentColor.copy(alpha = 0.7f)
+            )
+            Spacer(modifier = Modifier.height(Dimens.spacingXs))
+            LinearProgressIndicator(
+                progress = { localBiosScanProgress },
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
+            )
+        }
+
+        if (!isDownloading && !isDistributing && !isScanningLocalBios) {
             Spacer(modifier = Modifier.height(Dimens.spacingMd))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Dimens.spacingSm)
             ) {
                 val downloadSelected = isFocused && actionIndex == 0
+                val downloadEnabled = totalFiles > 0
                 val downloadBgColor = when {
                     downloadSelected -> MaterialTheme.colorScheme.primary
                     isFocused -> MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.12f)
@@ -630,6 +656,7 @@ private fun BiosSummaryCard(
                 }
                 val downloadTextColor = when {
                     downloadSelected -> MaterialTheme.colorScheme.onPrimary
+                    !downloadEnabled -> contentColor.copy(alpha = 0.5f)
                     else -> contentColor
                 }
 
@@ -638,7 +665,7 @@ private fun BiosSummaryCard(
                         .weight(1f)
                         .clip(RoundedCornerShape(Dimens.radiusSm))
                         .background(downloadBgColor)
-                        .clickableNoFocus { onDownloadAll() }
+                        .clickableNoFocus(enabled = downloadEnabled) { onDownloadAll() }
                         .padding(horizontal = Dimens.spacingMd, vertical = Dimens.spacingSm),
                     contentAlignment = Alignment.Center
                 ) {
@@ -651,7 +678,11 @@ private fun BiosSummaryCard(
                         )
                         Spacer(modifier = Modifier.width(Dimens.spacingXs))
                         Text(
-                            text = if (missingFiles > 0) "Download $missingFiles" else "Redownload",
+                            text = when {
+                                totalFiles == 0 -> "Download"
+                                missingFiles > 0 -> "Download $missingFiles"
+                                else -> "Redownload"
+                            },
                             style = MaterialTheme.typography.labelMedium,
                             color = downloadTextColor
                         )
@@ -685,6 +716,42 @@ private fun BiosSummaryCard(
                         style = MaterialTheme.typography.labelMedium,
                         color = distributeTextColor
                     )
+                }
+
+                val scanSelected = isFocused && actionIndex == 2
+                val scanBgColor = when {
+                    scanSelected -> MaterialTheme.colorScheme.primary
+                    isFocused -> MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.12f)
+                    else -> MaterialTheme.colorScheme.surfaceVariant
+                }
+                val scanTextColor = when {
+                    scanSelected -> MaterialTheme.colorScheme.onPrimary
+                    else -> contentColor
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(Dimens.radiusSm))
+                        .background(scanBgColor)
+                        .clickableNoFocus { onScanLocal() }
+                        .padding(horizontal = Dimens.spacingMd, vertical = Dimens.spacingSm),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = null,
+                            tint = scanTextColor,
+                            modifier = Modifier.size(Dimens.spacingMd)
+                        )
+                        Spacer(modifier = Modifier.width(Dimens.spacingXs))
+                        Text(
+                            text = "Find",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = scanTextColor
+                        )
+                    }
                 }
             }
         }

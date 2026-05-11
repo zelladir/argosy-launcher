@@ -31,6 +31,7 @@ internal sealed class EmulatorsItem(
     open val isFocusable: Boolean = true
 ) {
     data object CheckForUpdates : EmulatorsItem("check_updates", "platforms")
+    data object DefaultToRetroArch : EmulatorsItem("default_retroarch", "platforms")
 
     class SectionHeader(key: String, section: String, val title: String) : EmulatorsItem(
         key = key, section = section
@@ -48,6 +49,7 @@ internal sealed class EmulatorsItem(
             return buildList {
                 add(SectionHeader("header_active", "platforms", "Active Platforms"))
                 add(CheckForUpdates)
+                add(DefaultToRetroArch)
                 active.forEach { config ->
                     add(PlatformItem(config, platforms.indexOf(config)))
                 }
@@ -77,7 +79,7 @@ internal fun createEmulatorsLayout(items: List<EmulatorsItem>) = SettingsLayout<
 )
 
 internal fun emulatorsMaxFocusIndex(platformCount: Int): Int {
-    return platformCount.coerceAtLeast(0)
+    return (platformCount + 1).coerceAtLeast(1)
 }
 
 internal data class EmulatorsLayoutInfo(
@@ -145,6 +147,13 @@ fun EmulatorsSection(
                         else "Check for emulator updates",
                         isFocused = isFocused(item),
                         onClick = { viewModel.forceCheckEmulatorUpdates() }
+                    )
+
+                    EmulatorsItem.DefaultToRetroArch -> ActionPreference(
+                        title = "Use RetroArch Everywhere",
+                        subtitle = "Set RetroArch as the global default and apply it to supported platforms",
+                        isFocused = isFocused(item),
+                        onClick = { viewModel.defaultAllToRetroArch() }
                     )
 
                     is EmulatorsItem.PlatformItem -> {

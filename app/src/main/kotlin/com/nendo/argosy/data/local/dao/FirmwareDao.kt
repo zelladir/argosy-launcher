@@ -18,6 +18,9 @@ interface FirmwareDao {
     @Query("SELECT * FROM firmware WHERE platformSlug = :platformSlug ORDER BY fileName ASC")
     suspend fun getByPlatformSlug(platformSlug: String): List<FirmwareEntity>
 
+    @Query("SELECT * FROM firmware WHERE platformId = :platformId AND fileName = :fileName LIMIT 1")
+    suspend fun getByPlatformAndFileName(platformId: Long, fileName: String): FirmwareEntity?
+
     @Query("SELECT * FROM firmware WHERE localPath IS NULL ORDER BY platformSlug, fileName")
     suspend fun getMissing(): List<FirmwareEntity>
 

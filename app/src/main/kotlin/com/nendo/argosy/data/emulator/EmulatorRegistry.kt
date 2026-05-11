@@ -915,7 +915,15 @@ object EmulatorRegistry {
         return emulators.filter { canonical in it.supportedPlatforms }
     }
 
-    fun getRecommendedEmulators(): Map<String, List<String>> = mapOf(
+    private val retroArchRecommendedIds = listOf("retroarch", "retroarch_64")
+
+    private val retroArchSupportedPlatforms: Set<String>
+        get() = retroArchRecommendedIds
+            .mapNotNull { getById(it) }
+            .flatMap { it.supportedPlatforms }
+            .toSet()
+
+    private val baseRecommendedEmulators: Map<String, List<String>> = mapOf(
         "psx" to listOf("builtin", "duckstation", "retroarch", "retroarch_64"),
         "ps2" to listOf("nethersx2", "armsx2", "psx2", "pcsx2"),
         "psp" to listOf("builtin", "ppsspp_gold", "ppsspp", "retroarch", "retroarch_64"),
@@ -959,6 +967,18 @@ object EmulatorRegistry {
         "vic20" to listOf("retroarch", "retroarch_64"),
         "pc9800" to listOf("retroarch", "retroarch_64")
     )
+
+    fun getRecommendedEmulators(): Map<String, List<String>> {
+        val retroArchPlatforms = retroArchSupportedPlatforms
+        return (baseRecommendedEmulators.keys + retroArchPlatforms).associateWith { platformSlug ->
+            val base = baseRecommendedEmulators[platformSlug].orEmpty()
+            if (platformSlug in retroArchPlatforms) {
+                (base + retroArchRecommendedIds).distinct()
+            } else {
+                base
+            }
+        }
+    }
 
     fun getPreferredCore(platformId: String): String? {
         val canonical = PlatformDefinitions.getCanonicalSlug(platformId)

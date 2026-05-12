@@ -147,6 +147,18 @@ fun SettingsScreen(
         }
     }
 
+    val backupExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri: Uri? ->
+        if (uri != null) viewModel.performExportBackup(uri)
+    }
+
+    val backupImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) viewModel.inspectImportBackup(uri)
+    }
+
     var showFileBrowser by remember { mutableStateOf(false) }
     var fileBrowserTitle by remember { mutableStateOf<String?>(null) }
     var fileBrowserCallback by remember { mutableStateOf<((String) -> Unit)?>(null) }
@@ -255,6 +267,25 @@ fun SettingsScreen(
     LaunchedEffect(Unit) {
         viewModel.openAudioFilePickerEvent.collect {
             audioFilePickerLauncher.launch(arrayOf("audio/*"))
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.openBackupExportPickerEvent.collect { fileName ->
+            backupExportLauncher.launch(fileName)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.openBackupImportPickerEvent.collect {
+            backupImportLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.quitForRestoreEvent.collect {
+            (context as? android.app.Activity)?.finishAffinity()
+            android.os.Process.killProcess(android.os.Process.myPid())
         }
     }
 
@@ -679,6 +710,109 @@ fun SettingsScreen(
                 TextButton(onClick = { viewModel.cancelPurgeAll() }) {
                     Text("Cancel")
                 }
+            }
+        )
+    }
+
+    if (uiState.backup.showExportWarning) {
+        AlertDialog(
+            onDismissRequest = { viewModel.cancelExportWarning() },
+            title = { Text("Export App Data?") },
+            text = {
+                Text(
+                    "This will create a single archive containing your local database, settings, " +
+                    "and preferences. The archive may contain credentials (RomM, RetroAchievements, " +
+                    "social login tokens). Treat it like a password file. ROM files are NOT included."
+                )
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.confirmExportBackup() }) { Text("Choose Location") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.cancelExportWarning() }) { Text("Cancel") }
+            }
+        )
+    }
+
+    val pendingImport = uiState.backup.pendingImport
+    if (pendingImport != null) {
+        AlertDialog(
+            onDismissRequest = { viewModel.cancelImportWarning() },
+            title = { Text("Restore Backup?") },
+            text = {
+                Column {
+                    Text(
+                        "Restoring will REPLACE your current database, DataStore, and shared " +
+                        "preferences with the archive contents. Active downloads and pending " +
+                        "syncs will be discarded on restart."
+                    )
+                    Text(
+                        "Archive: ${pendingImport.archivePackageName} v${pendingImport.archiveVersionName} " +
+                            "(${pendingImport.archiveVersionCode})",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = Dimens.spacingSm)
+                    )
+                    Text(
+                        "Sections: ${pendingImport.sections.joinToString(", ")}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (pendingImport.includesCredentials) {
+                        Text(
+                            "Archive contains credentials/tokens.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = Dimens.spacingSm)
+                        )
+                    }
+                    Text(
+                        "The app will need to quit and reopen to finish applying the restore.",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = Dimens.spacingSm)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.confirmImportRestore() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    ),
+                    enabled = !uiState.backup.isImportStaging
+                ) {
+                    Text(if (uiState.backup.isImportStaging) "Staging..." else "Restore")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { viewModel.cancelImportWarning() },
+                    enabled = !uiState.backup.isImportStaging
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (uiState.backup.restoreStaged) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissRestoreStaged() },
+            title = { Text("Restart to finish restore") },
+            text = {
+                Text(
+                    "The backup has been staged. Quit Argosy now to apply the restore; the next " +
+                    "launch will overwrite your local data with the archive contents."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.quitForRestore() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("Quit Now") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissRestoreStaged() }) { Text("Later") }
             }
         )
     }

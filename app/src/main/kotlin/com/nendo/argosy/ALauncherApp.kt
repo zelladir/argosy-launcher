@@ -1,10 +1,12 @@
 package com.nendo.argosy
 
 import android.app.Application
+import android.content.Context
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import com.nendo.argosy.data.backup.BackupRestorePerformer
 import com.nendo.argosy.data.local.dao.GameDao
 import com.nendo.argosy.data.local.dao.PlatformDao
 import com.nendo.argosy.data.platform.PlatformDefinitions
@@ -86,6 +88,11 @@ class ArgosyApp : Application(), Configuration.Provider, ImageLoaderFactory {
 
     @Inject
     lateinit var steamContentManager: SteamContentManager
+
+    override fun attachBaseContext(base: Context) {
+        BackupRestorePerformer.applyPendingIfAny(base)
+        super.attachBaseContext(base)
+    }
 
     override fun onCreate() {
         super.onCreate()

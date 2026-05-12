@@ -269,6 +269,8 @@ private fun routeStorageConfirm(vm: SettingsViewModel, state: SettingsUiState): 
         StorageItem.ImageCache -> vm.openImageCachePicker()
         StorageItem.ValidateCache -> vm.validateImageCache()
         StorageItem.WeeklyIntegrityCheck -> vm.toggleWeeklyIntegrityCheck(!state.storage.weeklyIntegrityCheckEnabled)
+        StorageItem.ExportBackup -> vm.requestExportBackup()
+        StorageItem.ImportBackup -> vm.requestImportBackup()
         StorageItem.PurgeAll -> vm.requestPurgeAll()
         else -> {}
     }

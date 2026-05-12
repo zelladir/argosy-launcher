@@ -943,5 +943,26 @@ data class SettingsUiState(
     val gradientExtractionResult: GradientExtractionResult? = null,
     val frameDownloadingId: String? = null,
     val frameInstalledRefresh: Int = 0,
-    val appAffinityEnabled: Boolean = false
+    val appAffinityEnabled: Boolean = false,
+    val backup: BackupState = BackupState()
+)
+
+data class BackupState(
+    val isExporting: Boolean = false,
+    val isImportInspecting: Boolean = false,
+    val isImportStaging: Boolean = false,
+    val showExportWarning: Boolean = false,
+    val pendingImport: PendingImportInfo? = null,
+    val restoreStaged: Boolean = false,
+    val lastError: String? = null
+)
+
+data class PendingImportInfo(
+    val uri: String,
+    val archivePackageName: String,
+    val archiveVersionName: String,
+    val archiveVersionCode: Int,
+    val exportedAtMillis: Long,
+    val includesCredentials: Boolean,
+    val sections: List<String>
 )

@@ -10,6 +10,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -47,18 +49,24 @@ internal sealed class StorageItem(
     data object ValidateCache : StorageItem("validateCache", "locations")
     data object WeeklyIntegrityCheck : StorageItem("weeklyIntegrityCheck", "locations")
 
+    data object ExportBackup : StorageItem("exportBackup", "backup")
+    data object ImportBackup : StorageItem("importBackup", "backup")
+
     data object PurgeAll : StorageItem("purgeAll", "danger")
 
     companion object {
         private val DownloadsHeader = Header("downloadsHeader", "downloads", "DOWNLOADS")
         private val LocationsSpacer = SectionSpacer("locationsSpacer", "locations")
         private val LocationsHeader = Header("locationsHeader", "locations", "FILE LOCATIONS")
+        private val BackupSpacer = SectionSpacer("backupSpacer", "backup")
+        private val BackupHeader = Header("backupHeader", "backup", "BACKUP & RESTORE")
         private val DangerSpacer = SectionSpacer("dangerSpacer", "danger")
         private val DangerHeader = Header("dangerHeader", "danger", "DANGER ZONE")
 
         fun buildItems(): List<StorageItem> = listOf(
             DownloadsHeader, MaxDownloads, Threshold, DownloadedInfo,
             LocationsSpacer, LocationsHeader, GlobalRomPath, ImageCache, ValidateCache, WeeklyIntegrityCheck,
+            BackupSpacer, BackupHeader, ExportBackup, ImportBackup,
             DangerSpacer, DangerHeader, PurgeAll
         )
     }
@@ -73,13 +81,14 @@ private fun createStorageLayout(items: List<StorageItem>) = SettingsLayout<Stora
         when (it) {
             "downloads" -> "DOWNLOADS"
             "locations" -> "FILE LOCATIONS"
+            "backup" -> "BACKUP & RESTORE"
             "danger" -> "DANGER ZONE"
             else -> null
         }
     }
 )
 
-internal fun storageMaxFocusIndex(): Int = 6 // MaxDownloads, Threshold, GlobalRomPath, ImageCache, ValidateCache, WeeklyIntegrity, PurgeAll = 7 items - 1
+internal fun storageMaxFocusIndex(): Int = 8 // 7 prior focusables + Export + Import (PurgeAll still last)
 
 internal data class StorageLayoutInfo(
     val layout: SettingsLayout<StorageItem, StorageLayoutState>,
@@ -208,6 +217,30 @@ fun StorageSection(uiState: SettingsUiState, viewModel: SettingsViewModel) {
                     isFocused = isFocused(item),
                     onToggle = { viewModel.toggleWeeklyIntegrityCheck(it) }
                 )
+
+                StorageItem.ExportBackup -> {
+                    val isBusy = uiState.backup.isExporting
+                    ActionPreference(
+                        icon = Icons.Default.Backup,
+                        title = "Export App Data",
+                        subtitle = if (isBusy) "Exporting..." else "Save a backup archive of settings and library",
+                        isFocused = isFocused(item),
+                        isEnabled = !isBusy,
+                        onClick = { viewModel.requestExportBackup() }
+                    )
+                }
+
+                StorageItem.ImportBackup -> {
+                    val isBusy = uiState.backup.isImportInspecting || uiState.backup.isImportStaging
+                    ActionPreference(
+                        icon = Icons.Default.Restore,
+                        title = "Import App Data",
+                        subtitle = if (isBusy) "Preparing..." else "Restore from a backup archive (overwrites local data)",
+                        isFocused = isFocused(item),
+                        isEnabled = !isBusy,
+                        onClick = { viewModel.requestImportBackup() }
+                    )
+                }
 
                 StorageItem.PurgeAll -> {
                     val isPurging = storage.isPurgingAll

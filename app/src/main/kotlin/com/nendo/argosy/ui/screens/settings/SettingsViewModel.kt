@@ -113,7 +113,9 @@ class SettingsViewModel @Inject constructor(
     internal val coreOptionsRepo: CoreOptionsRepository,
     private val playStatsRepo: com.nendo.argosy.data.repository.PlayStatsRepository,
     private val biosRepository: com.nendo.argosy.data.repository.BiosRepository,
-    private val savePathValidator: com.nendo.argosy.data.emulator.SavePathValidator
+    private val savePathValidator: com.nendo.argosy.data.emulator.SavePathValidator,
+    private val exportAppBackupUseCase: com.nendo.argosy.domain.usecase.backup.ExportAppBackupUseCase,
+    private val importAppBackupUseCase: com.nendo.argosy.domain.usecase.backup.ImportAppBackupUseCase
 ) : ViewModel() {
 
     internal val _uiState = MutableStateFlow(SettingsUiState())
@@ -169,6 +171,15 @@ class SettingsViewModel @Inject constructor(
 
     internal val _openDeviceSettingsEvent = MutableSharedFlow<Unit>()
     val openDeviceSettingsEvent: SharedFlow<Unit> = _openDeviceSettingsEvent.asSharedFlow()
+
+    internal val _openBackupExportPickerEvent = MutableSharedFlow<String>()
+    val openBackupExportPickerEvent: SharedFlow<String> = _openBackupExportPickerEvent.asSharedFlow()
+
+    internal val _openBackupImportPickerEvent = MutableSharedFlow<Unit>()
+    val openBackupImportPickerEvent: SharedFlow<Unit> = _openBackupImportPickerEvent.asSharedFlow()
+
+    internal val _quitForRestoreEvent = MutableSharedFlow<Unit>()
+    val quitForRestoreEvent: SharedFlow<Unit> = _quitForRestoreEvent.asSharedFlow()
 
     init {
         routeObserveDelegateStates(this)
@@ -877,6 +888,134 @@ class SettingsViewModel @Inject constructor(
     fun requestPurgeAll() = storageDelegate.requestPurgeAll()
     fun confirmPurgeAll() = storageDelegate.confirmPurgeAll(viewModelScope)
     fun cancelPurgeAll() = storageDelegate.cancelPurgeAll()
+
+    fun requestExportBackup() {
+        _uiState.update { it.copy(backup = it.backup.copy(showExportWarning = true, lastError = null)) }
+    }
+
+    fun cancelExportWarning() {
+        _uiState.update { it.copy(backup = it.backup.copy(showExportWarning = false)) }
+    }
+
+    fun confirmExportBackup() {
+        _uiState.update { it.copy(backup = it.backup.copy(showExportWarning = false)) }
+        viewModelScope.launch {
+            val timestamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+            _openBackupExportPickerEvent.emit("argosy-backup-$timestamp.zip")
+        }
+    }
+
+    fun performExportBackup(uri: android.net.Uri) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(backup = it.backup.copy(isExporting = true, lastError = null)) }
+            val result = exportAppBackupUseCase(uri)
+            _uiState.update {
+                it.copy(
+                    backup = it.backup.copy(
+                        isExporting = false,
+                        lastError = (result as? com.nendo.argosy.data.backup.BackupExportResult.Failure)?.reason
+                    )
+                )
+            }
+        }
+    }
+
+    fun requestImportBackup() {
+        _uiState.update { it.copy(backup = it.backup.copy(lastError = null)) }
+        viewModelScope.launch { _openBackupImportPickerEvent.emit(Unit) }
+    }
+
+    fun inspectImportBackup(uri: android.net.Uri) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(backup = it.backup.copy(isImportInspecting = true, lastError = null)) }
+            when (val r = importAppBackupUseCase.inspect(uri)) {
+                is com.nendo.argosy.domain.usecase.backup.ImportAppBackupUseCase.InspectResult.Ok -> {
+                    _uiState.update {
+                        it.copy(
+                            backup = it.backup.copy(
+                                isImportInspecting = false,
+                                pendingImport = PendingImportInfo(
+                                    uri = uri.toString(),
+                                    archivePackageName = r.manifest.packageName,
+                                    archiveVersionName = r.manifest.versionName,
+                                    archiveVersionCode = r.manifest.versionCode,
+                                    exportedAtMillis = r.manifest.exportedAt,
+                                    includesCredentials = r.manifest.includesCredentials,
+                                    sections = r.manifest.sections
+                                )
+                            )
+                        )
+                    }
+                }
+                is com.nendo.argosy.domain.usecase.backup.ImportAppBackupUseCase.InspectResult.Incompatible -> {
+                    notificationManager.show(
+                        title = "Cannot import",
+                        subtitle = r.reason,
+                        type = com.nendo.argosy.core.notification.NotificationType.ERROR,
+                        duration = com.nendo.argosy.core.notification.NotificationDuration.LONG
+                    )
+                    _uiState.update {
+                        it.copy(backup = it.backup.copy(isImportInspecting = false, lastError = r.reason))
+                    }
+                }
+                is com.nendo.argosy.domain.usecase.backup.ImportAppBackupUseCase.InspectResult.Invalid -> {
+                    notificationManager.show(
+                        title = "Invalid backup",
+                        subtitle = r.reason,
+                        type = com.nendo.argosy.core.notification.NotificationType.ERROR,
+                        duration = com.nendo.argosy.core.notification.NotificationDuration.LONG
+                    )
+                    _uiState.update {
+                        it.copy(backup = it.backup.copy(isImportInspecting = false, lastError = r.reason))
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelImportWarning() {
+        _uiState.update { it.copy(backup = it.backup.copy(pendingImport = null)) }
+    }
+
+    fun confirmImportRestore() {
+        val pending = _uiState.value.backup.pendingImport ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(backup = it.backup.copy(isImportStaging = true)) }
+            val manifest = importAppBackupUseCase.inspect(android.net.Uri.parse(pending.uri))
+                .let { (it as? com.nendo.argosy.domain.usecase.backup.ImportAppBackupUseCase.InspectResult.Ok)?.manifest }
+            if (manifest == null) {
+                _uiState.update {
+                    it.copy(backup = it.backup.copy(isImportStaging = false, pendingImport = null,
+                        lastError = "Archive became unreadable"))
+                }
+                return@launch
+            }
+            val result = importAppBackupUseCase.stage(android.net.Uri.parse(pending.uri), manifest)
+            _uiState.update {
+                it.copy(
+                    backup = it.backup.copy(
+                        isImportStaging = false,
+                        pendingImport = null,
+                        restoreStaged = result is com.nendo.argosy.data.backup.BackupImportResult.Staged,
+                        lastError = when (result) {
+                            is com.nendo.argosy.data.backup.BackupImportResult.Failure -> result.reason
+                            is com.nendo.argosy.data.backup.BackupImportResult.ValidationFailed -> result.reason
+                            else -> null
+                        }
+                    )
+                )
+            }
+        }
+    }
+
+    fun dismissRestoreStaged() {
+        _uiState.update { it.copy(backup = it.backup.copy(restoreStaged = false)) }
+    }
+
+    fun quitForRestore() {
+        viewModelScope.launch { _quitForRestoreEvent.emit(Unit) }
+    }
     fun confirmPlatformMigration() = storageDelegate.confirmPlatformMigration(viewModelScope)
     fun cancelPlatformMigration() = storageDelegate.cancelPlatformMigration()
     fun skipPlatformMigration() = storageDelegate.skipPlatformMigration(viewModelScope)

@@ -5,8 +5,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.UserManager
 import android.util.Log
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
+import com.nendo.argosy.BuildConfig
 import com.nendo.argosy.data.emulator.M3uManager
 import com.nendo.argosy.data.local.dao.GameDao
 import com.nendo.argosy.data.local.dao.GameDiscDao
@@ -21,15 +20,18 @@ import com.nendo.argosy.data.remote.romm.RomMRepository
 import com.nendo.argosy.data.remote.romm.RomMResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "GameRepository"
+private const val RELEASE_PACKAGE_NAME = "com.nendo.argosy"
 
 data class PlatformStats(
     val platformId: Long,
@@ -72,6 +74,68 @@ class GameRepository @Inject constructor(
     private suspend fun getGlobalDownloadDir(): File {
         val prefs = preferencesRepository.userPreferences.first()
         return prefs.romStoragePath?.let { File(it) } ?: defaultDownloadDir
+    }
+
+    private fun storageVolumeRoots(): List<File> {
+        val packageFilesSuffix = "/Android/data/${context.packageName}/files"
+        return buildList {
+            context.getExternalFilesDirs(null)
+                .filterNotNull()
+                .map { it.absolutePath.replace('\\', '/') }
+                .forEach { path ->
+                    if (path.endsWith(packageFilesSuffix)) {
+                        add(File(path.removeSuffix(packageFilesSuffix)))
+                    }
+                }
+            add(Environment.getExternalStorageDirectory())
+        }.distinctBy { it.absolutePath }
+    }
+
+    private fun debugSharedDownloadDirs(platformSlug: String): List<File> {
+        if (!BuildConfig.DEBUG || context.packageName == RELEASE_PACKAGE_NAME) return emptyList()
+
+        return storageVolumeRoots().flatMap { root ->
+            listOf(
+                File(root, "ROMs/$platformSlug"),
+                File(root, "roms/$platformSlug"),
+                File(root, "Android/data/$RELEASE_PACKAGE_NAME/files/downloads/$platformSlug")
+            )
+        }.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
+    }
+
+    private fun List<File>.dedupeByCanonicalPath(): List<File> =
+        distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
+
+    private suspend fun getPrimaryDiscoveryDirs(platformSlug: String): List<File> {
+        val platform = platformDao.getBySlug(platformSlug)
+        val prefs = preferencesRepository.userPreferences.first()
+
+        return buildList {
+            if (platform?.customRomPath != null) {
+                add(File(platform.customRomPath))
+            } else if (prefs.romStoragePath != null) {
+                add(File(prefs.romStoragePath, platformSlug))
+            } else {
+                add(File(defaultDownloadDir, platformSlug))
+            }
+            addAll(debugSharedDownloadDirs(platformSlug))
+        }.dedupeByCanonicalPath()
+    }
+
+    private suspend fun getFallbackDiscoveryDirs(platformSlug: String): List<File> {
+        val platform = platformDao.getBySlug(platformSlug)
+        val prefs = preferencesRepository.userPreferences.first()
+
+        return buildList {
+            if (platform?.customRomPath != null) {
+                add(File(platform.customRomPath))
+            }
+            if (prefs.romStoragePath != null) {
+                add(File(prefs.romStoragePath, platformSlug))
+            }
+            add(File(defaultDownloadDir, platformSlug))
+            addAll(debugSharedDownloadDirs(platformSlug))
+        }.dedupeByCanonicalPath()
     }
 
     private fun isStorageReady(): Boolean {
@@ -176,22 +240,8 @@ class GameRepository @Inject constructor(
 
     private suspend fun resolveFileFallback(originalPath: String, platformSlug: String): String? {
         val fileName = File(originalPath).name
-        val candidateDirs = buildList {
-            // Per-platform custom path
-            val platform = platformDao.getBySlug(platformSlug)
-            if (platform?.customRomPath != null) {
-                add(File(platform.customRomPath))
-            }
-            // Global custom path
-            val prefs = preferencesRepository.userPreferences.first()
-            if (prefs.romStoragePath != null) {
-                add(File(prefs.romStoragePath, platformSlug))
-            }
-            // Default path
-            add(File(defaultDownloadDir, platformSlug))
-        }
 
-        for (dir in candidateDirs) {
+        for (dir in getFallbackDiscoveryDirs(platformSlug)) {
             if (!dir.exists()) continue
             // Direct file match
             val candidate = File(dir, fileName)
@@ -213,6 +263,29 @@ class GameRepository @Inject constructor(
         return File(path).exists()
     }
 
+    private suspend fun findLocalFileInEntries(
+        platformDir: File,
+        files: List<File>,
+        folders: List<File>,
+        game: GameEntity,
+        expectedFileName: String? = null
+    ): File? {
+        if (expectedFileName != null) {
+            val expectedFile = File(platformDir, expectedFileName)
+            expectedFile.takeIf { it.exists() }?.let { return it }
+            files.find { filenamesMatch(it.name, expectedFileName) }?.let { return it }
+        }
+
+        findLocalFileForGame(files, game)?.let { return it }
+
+        val folderMatch = folders.find { folder -> titlesMatch(folder.name, game.title) }
+        if (folderMatch != null) {
+            return findPrimaryRomInFolder(folderMatch, game.platformSlug)
+        }
+
+        return null
+    }
+
     suspend fun discoverLocalFiles(): Int = withContext(Dispatchers.IO) {
         if (!isStorageReady()) {
             Log.w(TAG, "discoverLocalFiles: storage not ready, skipping")
@@ -228,29 +301,25 @@ class GameRepository @Inject constructor(
         var discovered = 0
 
         for ((platformSlug, games) in gamesByPlatform) {
-            val platformDir = getDownloadDir(platformSlug)
-            if (!platformDir.exists()) continue
+            val unresolved = games.toMutableList()
 
-            val allEntries = platformDir.listFiles() ?: continue
-            val files = allEntries.filter { it.isFile && !it.name.endsWith(".tmp") }
-            val folders = allEntries.filter { it.isDirectory }
+            for (platformDir in getPrimaryDiscoveryDirs(platformSlug)) {
+                if (unresolved.isEmpty()) break
+                if (!platformDir.exists()) continue
 
-            for (game in games) {
-                val fileMatch = findLocalFileForGame(files, game)
-                if (fileMatch != null) {
-                    gameDao.updateLocalPath(game.id, fileMatch.absolutePath, GameSource.ROMM_SYNCED)
-                    discovered++
-                    Log.d(TAG, "Discovered file: ${game.title} -> ${fileMatch.name}")
-                    continue
-                }
+                val allEntries = platformDir.listFiles() ?: continue
+                val files = allEntries.filter { it.isFile && !it.name.endsWith(".tmp") }
+                val folders = allEntries.filter { it.isDirectory }
 
-                val folderMatch = folders.find { folder -> titlesMatch(folder.name, game.title) }
-                if (folderMatch != null) {
-                    val primaryRom = findPrimaryRomInFolder(folderMatch, game.platformSlug)
-                    if (primaryRom != null) {
-                        gameDao.updateLocalPath(game.id, primaryRom.absolutePath, GameSource.ROMM_SYNCED)
+                val iterator = unresolved.iterator()
+                while (iterator.hasNext()) {
+                    val game = iterator.next()
+                    val localFile = findLocalFileInEntries(platformDir, files, folders, game)
+                    if (localFile != null) {
+                        gameDao.updateLocalPath(game.id, localFile.absolutePath, GameSource.ROMM_SYNCED)
                         discovered++
-                        Log.d(TAG, "Discovered folder: ${game.title} -> ${folderMatch.name}/${primaryRom.name}")
+                        iterator.remove()
+                        Log.d(TAG, "Discovered local file: ${game.title} -> ${localFile.absolutePath}")
                     }
                 }
             }
@@ -298,30 +367,17 @@ class GameRepository @Inject constructor(
                     val rom = result.data
                     val fileName = rom.fileName ?: continue
 
-                    val platformDir = getDownloadDir(game.platformSlug)
-                    val entries = platformDir.listFiles() ?: continue
-                    val files = entries.filter { it.isFile && !it.name.endsWith(".tmp") }
-                    val folders = entries.filter { it.isDirectory }
-
-                    // Exact direct-child first (cheapest), then case-insensitive
-                    // filename match (covers rename-by-magic), then folder by title.
-                    val expectedFile = File(platformDir, fileName)
-                    val fileMatch = expectedFile.takeIf { it.exists() }
-                        ?: files.find { filenamesMatch(it.name, fileName) }
-                    if (fileMatch != null) {
-                        gameDao.updateLocalPath(game.id, fileMatch.absolutePath, GameSource.ROMM_SYNCED)
-                        recovered++
-                        Log.d(TAG, "Recovered download path for: ${game.title} -> ${fileMatch.name}")
-                        continue
-                    }
-
-                    val matchingFolder = folders.find { folder -> titlesMatch(folder.name, game.title) }
-                    if (matchingFolder != null) {
-                        val gameFile = findPrimaryRomInFolder(matchingFolder, game.platformSlug)
-                        if (gameFile != null) {
-                            gameDao.updateLocalPath(game.id, gameFile.absolutePath, GameSource.ROMM_SYNCED)
+                    for (platformDir in getPrimaryDiscoveryDirs(game.platformSlug)) {
+                        if (!platformDir.exists()) continue
+                        val entries = platformDir.listFiles() ?: continue
+                        val files = entries.filter { it.isFile && !it.name.endsWith(".tmp") }
+                        val folders = entries.filter { it.isDirectory }
+                        val localFile = findLocalFileInEntries(platformDir, files, folders, game, fileName)
+                        if (localFile != null) {
+                            gameDao.updateLocalPath(game.id, localFile.absolutePath, GameSource.ROMM_SYNCED)
                             recovered++
-                            Log.d(TAG, "Recovered folder path for: ${game.title} -> ${matchingFolder.name}/${gameFile.name}")
+                            Log.d(TAG, "Recovered download path for: ${game.title} -> ${localFile.absolutePath}")
+                            break
                         }
                     }
                 }
@@ -355,26 +411,17 @@ class GameRepository @Inject constructor(
 
         if (game.rommId == null) return@withContext false
 
-        val platformDir = getDownloadDir(game.platformSlug)
-        if (!platformDir.exists()) return@withContext false
+        for (platformDir in getPrimaryDiscoveryDirs(game.platformSlug)) {
+            if (!platformDir.exists()) continue
 
-        val allEntries = platformDir.listFiles() ?: return@withContext false
-        val files = allEntries.filter { it.isFile && !it.name.endsWith(".tmp") }
-        val folders = allEntries.filter { it.isDirectory }
+            val allEntries = platformDir.listFiles() ?: continue
+            val files = allEntries.filter { it.isFile && !it.name.endsWith(".tmp") }
+            val folders = allEntries.filter { it.isDirectory }
 
-        val fileMatch = findLocalFileForGame(files, game)
-        if (fileMatch != null) {
-            gameDao.updateLocalPath(gameId, fileMatch.absolutePath, GameSource.ROMM_SYNCED)
-            Log.d(TAG, "Discovered file for ${game.title}: ${fileMatch.name}")
-            return@withContext true
-        }
-
-        val folderMatch = folders.find { folder -> titlesMatch(folder.name, game.title) }
-        if (folderMatch != null) {
-            val primaryRom = findPrimaryRomInFolder(folderMatch, game.platformSlug)
-            if (primaryRom != null) {
-                gameDao.updateLocalPath(gameId, primaryRom.absolutePath, GameSource.ROMM_SYNCED)
-                Log.d(TAG, "Discovered folder for ${game.title}: ${folderMatch.name}/${primaryRom.name}")
+            val localFile = findLocalFileInEntries(platformDir, files, folders, game)
+            if (localFile != null) {
+                gameDao.updateLocalPath(gameId, localFile.absolutePath, GameSource.ROMM_SYNCED)
+                Log.d(TAG, "Discovered local file for ${game.title}: ${localFile.absolutePath}")
                 return@withContext true
             }
         }
@@ -522,27 +569,24 @@ class GameRepository @Inject constructor(
         var discovered = 0
 
         for ((platformSlug, platformGames) in gamesByPlatform) {
-            val platformDir = getDownloadDir(platformSlug)
-            if (!platformDir.exists()) continue
+            val unresolved = platformGames.toMutableList()
 
-            val allEntries = platformDir.listFiles() ?: continue
-            val files = allEntries.filter { it.isFile && !it.name.endsWith(".tmp") }
-            val folders = allEntries.filter { it.isDirectory }
+            for (platformDir in getPrimaryDiscoveryDirs(platformSlug)) {
+                if (unresolved.isEmpty()) break
+                if (!platformDir.exists()) continue
 
-            for (game in platformGames) {
-                val fileMatch = findLocalFileForGame(files, game)
-                if (fileMatch != null) {
-                    gameDao.updateLocalPath(game.id, fileMatch.absolutePath, GameSource.ROMM_SYNCED)
-                    discovered++
-                    continue
-                }
+                val allEntries = platformDir.listFiles() ?: continue
+                val files = allEntries.filter { it.isFile && !it.name.endsWith(".tmp") }
+                val folders = allEntries.filter { it.isDirectory }
 
-                val folderMatch = folders.find { folder -> titlesMatch(folder.name, game.title) }
-                if (folderMatch != null) {
-                    val primaryRom = findPrimaryRomInFolder(folderMatch, game.platformSlug)
-                    if (primaryRom != null) {
-                        gameDao.updateLocalPath(game.id, primaryRom.absolutePath, GameSource.ROMM_SYNCED)
+                val iterator = unresolved.iterator()
+                while (iterator.hasNext()) {
+                    val game = iterator.next()
+                    val localFile = findLocalFileInEntries(platformDir, files, folders, game)
+                    if (localFile != null) {
+                        gameDao.updateLocalPath(game.id, localFile.absolutePath, GameSource.ROMM_SYNCED)
                         discovered++
+                        iterator.remove()
                     }
                 }
             }
